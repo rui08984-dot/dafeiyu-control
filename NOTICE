@@ -1,0 +1,27 @@
+# NOTICE
+
+本仓库包含第三方算法的移植实现。所有第三方内容按原许可使用，清单如下。
+
+## AkaneCompanionLab — Apache License 2.0
+
+- 项目：AkaneCompanionLab
+- 作者：misaka-coder
+- 地址：https://github.com/misaka-coder/AkaneCompanionLab
+- 许可：Apache License 2.0（https://www.apache.org/licenses/LICENSE-2.0）
+- 使用范围：`src/geometry.rs`、`src/placement.rs` 的窗口几何与面板/字幕布局算法，
+  移植自该项目的 `desktop_pet_next/src-tauri/src/pet_windows/{models,placement}.rs`。
+- 修改说明：去掉了 Tauri 类型依赖，改为纯数据 + 纯函数，并补充了单元测试。
+
+Apache-2.0 要求的版权与许可声明见上游仓库的 `LICENSE` 与源文件头。
+
+## 关于 AAAAGENT
+
+**本仓库不包含 AAAAGENT 的任何代码、文档或数据。**
+
+长期记忆召回模块（上游标识为移植自 AAAAGENT 的 `recall`）已在本仓库中**整体移除**，
+`src/lib.rs` 不再声明该模块。若你从其他渠道取得该模块，请自行确认其许可。
+
+## 其他
+
+- `tools/key-policy.json` 中的按键拦截规则为本项目自有配置。
+- `src/native.rs` 内联的按键策略表与 `tools/key-policy.json` 保持同源。

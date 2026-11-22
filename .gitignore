@@ -1,0 +1,46 @@
+# Rust 构建产物
+/target/
+**/*.rs.bk
+
+# Node
+node_modules/
+
+# 构建输出
+build/
+dist/
+
+# Live2D 资产（不随仓库分发，需自备）
+*.moc3
+vendor/cubism/
+live2dcubismcore*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 本地配置与凭据
+.env
+.env.*
+.control-token
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 运行时数据（派活账本 / 技能历史 / 病历本 / 记录室）
+/data/
+/pet-runtime/data/
+AI记录室/
+# 自备知识库（用户数据，不入库）
+/pet-runtime/knowledge/
+_private/
+_incoming/
+_research/
+
+# 日志与系统垃圾
+*.log
+logs/
+.DS_Store
+Thumbs.db
