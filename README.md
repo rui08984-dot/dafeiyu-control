@@ -10,6 +10,9 @@ Rust 内核 + 宿主插件 + 本地 sidecar 工具。从桌宠项目里拆出来
 ## 不含什么
 
 - 不含 AI 模型、API Key、账号凭据。
+- 不含执行器本体（派活默认接 DeepSeek Harness；需自行安装并用 `DSH_ROOT` 指到安装目录）。
+- 不含宿主运行时 `petbridge/vts-server.mjs`（8103 服务在宿主侧；本仓库只带派活的
+  账本 / 执行器适配 / 验收模块，以及与宿主无关的纯策略函数）。
 - 不含游戏专用脚本（本项目只提供通用的窗口/输入/视觉原语，游戏 profile 由使用方自备）。
 - 不含长期记忆召回模块（已移除，见 `NOTICE`）。
 - 不含日志、截图、录屏、用户数据。
@@ -27,8 +30,9 @@ Rust 内核 + 宿主插件 + 本地 sidecar 工具。从桌宠项目里拆出来
 | Rust 1.75+ | 构建 `pet-core` | 依赖 `windows` 0.62、`windows-future` 0.3 |
 | PowerShell 7（`pwsh`） | `pet-runtime/tools/*.ps1` sidecar | 不是 Windows PowerShell 5.1 |
 | Python 3.11+ | OCR / 视觉工具（可选） | `pip install rapidocr-onnxruntime pillow numpy opencv-python`；`ocr_read.py` 另需本地 Ollama 或兼容 VLM |
-| Node.js 18+ | `game-watch.cjs` 与两个宿主插件 | 仅插件和 `game-watch` 需要 |
+| Node.js 18+ | `game-watch.cjs`、`petbridge/*.mjs` 与两个宿主插件 | 仅插件和派活层需要；`.mjs` 直接跑，无需构建 |
 | 宿主应用 | 插件运行环境 | 需提供 `live-2d/js/core/plugin-base.js`；没有宿主时插件只能做语法检查 |
+| DeepSeek Harness（可选） | 派活的默认后端执行器 | 不是本仓库依赖；只在用 `dispatch_to_dsh` 时需要，用 `DSH_ROOT` 指到安装目录 |
 
 本仓库的 control 层**不需要 Cubism SDK / `.moc3` 模型**（那是同为桌宠项目的
 `dafeiyu-perform` 渲染层的依赖）。
@@ -42,6 +46,9 @@ Rust 内核 + 宿主插件 + 本地 sidecar 工具。从桌宠项目里拆出来
      整体拷到宿主的 `live-2d/plugins/community/` 下。
   3. 把 `pet-runtime/tools/` 放到宿主应用根（即宿主 `live-2d/` 的上一级）的 `pet-runtime/tools/`。
      插件按「`plugins/community/dispatch` 往上 4 层」定位这个目录；层级不同就必须改配置或同步调整。
+  4. 要用派活 v2 时，把 `live-2d/petbridge/` 一并拷到宿主的 `live-2d/petbridge/`。
+     宿主的 8103 服务（如自带 `vts-server.mjs`）通过 `dispatch-runner.mjs` /
+     `dispatch-ledger.mjs` / `dispatch-verify.mjs` 接线；也可用你自己的 HTTP 服务实现同款接口。
 - 知识库（可选）：把自备数据放到 `<宿主应用根>/pet-runtime/knowledge/`
   （`rules/`、`live/`、`experience/`、`templates/`）。目录不存在时 `knowledge` 工具会明确返回「未安装知识库」。
 
@@ -53,6 +60,11 @@ cargo build --release          # 产物 target/release/pet-core.exe
 node --check live-2d/plugins/community/dispatch/index.js
 node --check live-2d/plugins/community/dispatch/game-control.js
 node --check live-2d/plugins/community/game-actions/index.js
+node --check live-2d/petbridge/dispatch-runner.mjs
+node tests/test-dispatch-v2-p1.cjs
+node tests/test-dispatch-followup-policy.cjs
+node tests/test-dispatch-retry-policy.cjs
+node tests/test-capabilities.mjs
 echo '{"cmd":"windows"}' | target/release/pet-core.exe   # 应输出一行窗口枚举 JSON
 ```
 
@@ -71,6 +83,8 @@ flowchart LR
     UI[对话 / UI / 调度]
     DP[dispatch 插件]
     GA[game-actions 插件]
+    PB["petbridge<br/>runner / ledger / verify"]
+    DSH["DSH 执行器<br/>(headless --json)"]
   end
 
   subgraph Core["pet-core（Rust，本仓库）"]
@@ -94,7 +108,8 @@ flowchart LR
     GW[game-watch.cjs<br/>全屏/游戏判定]
   end
 
-  UI --> DP --> CLI
+  UI --> DP --> PB --> DSH
+  PB --> LEDGER[(数据根/数据目录<br/>dispatch-tasks)]
   UI --> GA
   DP --> SI
   DP --> US
@@ -105,6 +120,30 @@ flowchart LR
   DP --> NAT
   CLI --> GEO & GAZE & MOOD & KB & NAT & UIA & WGC
 ```
+
+### 派活执行层（可选）
+
+`live-2d/petbridge/` 是「把长任务交给后台编码 agent」的纯 Node 层，不依赖 Electron：
+
+```text
+dispatch 插件 ──POST /dispatch──▶ 宿主 8103 服务（vts-server 或自实现）
+                                      │
+                                      ├─ dispatch-runner.mjs   起 DSH 并持句柄，解析 NDJSON 事件
+                                      ├─ dispatch-verify.mjs   settle → 文件快照 diff → verify 四态
+                                      └─ dispatch-ledger.mjs   <数据根>/<数据目录>/dispatch-tasks/
+```
+
+- **执行器位置**：优先 `DSH_ROOT`，其次 `DSH_HOME`；都没配时 `DEFAULT_DSH_ROOT` 为空字符串，
+  真正 spawn 失败会在错误里给出「去哪配」的指引（`DSH_ROOT_HINT`），不会静默退化成假成功。
+- **凭据**：只读取 `DSH_CREDENTIALS`（默认 `<DSH_ROOT>/.credentials.yaml`）里的
+  `COMAD_BUNNY_API_KEY` / `DEEPSEEK_API_KEY` 注入子进程；**不打印、不落盘、不写日志**。
+- **数据根**：账本与记录目录统一走 `PET_DATA_ROOT` + `PET_DATA_DIR_NAME`（缺省 `data`）。
+  默认位置是 `<宿主应用根>/data/`；可用环境变量指到任意目录。
+- **CLI 薄壳**：`node live-2d/petbridge/dsh-dispatch.mjs --task "..." [--session id] [--json]`
+  只用于手动跑一次；与主进程共用同一份 `createDispatchRunner` 实现。
+- **vts-server 不在本仓库**：8103 的 HTTP 路由属于宿主生命周期；本仓库提供被它调用的
+  账本/执行器/验收模块。集成测试因此默认跳过，设 `MYNEURO_LIVE2D_DIR` 指向含
+  `petbridge/vts-server.mjs` 的宿主 `live-2d/` 后可跑满。
 
 ## 能力表
 
@@ -128,6 +167,11 @@ flowchart LR
 | 窗口枚举（C# 备选） | `pet-runtime/tools/WinEnum.cs` | 无 Rust 时的轻量替代 |
 | 前台窗口矩形 | `pet-runtime/tools/foreground-rect.ps1` | 2s 轮询输出 `left,top,right,bottom` |
 | 派活工具面 | `live-2d/plugins/community/dispatch/` | 15 个 LLM 工具：act/game/app/file/clipboard/batch/dispatch_to_dsh/dispatch_cancel/dispatch_followup/hand_action/knowledge/skill/appearance/see/check_dispatch |
+| 派活账本 | `live-2d/petbridge/dispatch-ledger.mjs` | 每任务 JSON + JSONL 事件流；24h requestId 幂等；启动恢复把残留 running 改 unknown（永不自动重派） |
+| 执行器适配 | `live-2d/petbridge/dispatch-runner.mjs` | 在宿主进程内 spawn 并持有 DSH 句柄；解析 NDJSON；`taskkill /T /F` 真取消 |
+| 派活验收 | `live-2d/petbridge/dispatch-verify.mjs` | workspace 校验、settle→文件快照 diff、verify 四态（pass/fail/broken/timeout） |
+| 续聊/重试策略 | `live-2d/js/core/dispatch-followup-policy.js`、`dispatch-retry-policy.js` | 纯函数；UI 与 IPC 共用同一道闸（终态+sessionId 才可续聊；只有 attempted=false 才可重试） |
+| 功能注册表 | `live-2d/js/core/capabilities.js` | 一个功能一行：开关位置/默认值/是否热生效/实现文件；`auditCapabilities({ implRoot })` 与真实配置对账 |
 | 游戏动作注册 | `live-2d/plugins/community/game-actions/` | 把游戏 profile 里的 actions 注册成 LLM 工具，换游戏只改数据 |
 
 ### pet-core CLI
@@ -163,17 +207,29 @@ cargo build --release
 ## 测试
 
 ```bash
-cargo test
+cargo test                                  # 55 passed
+node tests/test-dispatch-v2-p1.cjs          # 86 passed（2 节跳过：vts-server 不在仓内）
+node tests/test-dispatch-followup-policy.cjs # 47 passed
+node tests/test-dispatch-retry-policy.cjs    # 32 passed
+node tests/test-capabilities.mjs             # 35 passed
 ```
 
-55 个单元测试，覆盖布局、眼神、心情、PAD、BM25/向量/RRF、dHash、按键策略等纯逻辑。
+55 个 Rust 单测覆盖布局、眼神、心情、PAD、BM25/向量/RRF、dHash、按键策略等纯逻辑。
 
-`tests/` 下两个 JS 用例**不是自包含单测**：
+Node 用例全部**自包含**，只写系统临时目录：
 
-- `tests/test-dispatch-v2-p1.cjs` 依赖宿主的 `petbridge/`（`dispatch-verify.mjs`、
-  `dispatch-runner.mjs`、`vts-server.mjs`）。把 `MYNEURO_LIVE2D_DIR` 指向你的宿主
-  `live-2d/` 目录后才会真正执行；不设时它找 `<repo>/host/live-2d`（本仓库不带）。
-- `tests/e2e-click2.js` 会对真实桌面做 UIA 快照并点击，只能在交互式 Windows 会话里手动跑。
+- `test-dispatch-v2-p1.cjs`：verify 四态、返工、workspace、真 `taskkill` 取消、
+  账本恢复、插件工具面。第 3/4 节是 8103 集成用例，仓内没有 `vts-server.mjs` 时明确
+  打印 SKIP 并以 0 退出；设 `MYNEURO_LIVE2D_DIR` 指向带 `vts-server.mjs` 的宿主
+  `live-2d/` 后跑满 **162** 条断言。
+- `test-dispatch-followup-policy.cjs`：续聊闸门（终态 + sessionId）、失配文案、
+  请求体、插件入口真拒绝。
+- `test-dispatch-retry-policy.cjs`：只有 `failed + attempted=false` 可重试；
+  禁用原因、id 生成、请求体不夹带展示字段。
+- `test-capabilities.mjs`：注册表结构、缺键/插件/死键自检、`implRoot` 可配置
+  （默认根行为不变；指向完整宿主根时 impl-missing 归零）。
+- `tests/e2e-click2.js` 仍是对真实桌面做 UIA 快照并点击，只能在交互式 Windows
+  会话里手动跑，不纳入自动测试。
 
 ## 与宿主插件的接口
 
@@ -189,9 +245,14 @@ cargo test
    - `log(...)`、`sendMessage(...)`
 4. **插件依赖的 core 模块**：本仓库已自带在 `live-2d/js/core/`，放到位即可解析：
    `silent-audit.js`、`key-policy.js`、`geometry.js`、`json-store.js`、
-   `runtime-paths.js`、`route-experience.js`、`skill-health.js`，以及
+   `runtime-paths.js`、`route-experience.js`、`skill-health.js`、
+   `dispatch-followup-policy.js`、`dispatch-retry-policy.js`、`capabilities.js`，以及
    `route-experience.js` 的传递依赖 `records-path.js`。这些是**硬依赖**，
    缺任何一个都会让对应插件在 `require` 阶段失败，不是「缺失可降级」。
+5. **派活的 8103 服务**：`dispatch` 插件的 `dispatch_to_dsh` / `dispatch_cancel` /
+   `dispatch_followup` / `check_dispatch` 通过 HTTP 访问宿主的 8103 控制口。
+   `live-2d/petbridge/` 提供账本、执行器适配与验收模块；HTTP 路由本身由宿主实现
+   （本仓库不附带 `vts-server.mjs`）。没有 8103 时这些工具会返回「桌宠没在运行」。
 
 以下宿主模块**不在本仓库**，按需提供：
 
@@ -217,7 +278,10 @@ cargo test
 | 环境变量 | 作用 | 默认 |
 |---|---|---|
 | `PET_DATA_ROOT` | 数据根目录 | 宿主应用根（含 `live-2d/` 与 `pet-runtime/` 的目录） |
-| `PET_DATA_DIR_NAME` | 数据根下的子目录名 | `data` |
+| `PET_DATA_DIR_NAME` | 数据根下的子目录名（派活账本 + 记录目录） | `data` |
+| `DSH_ROOT` | DeepSeek Harness 安装根目录（派活执行器） | 空；未配时 spawn 失败会给出配置指引 |
+| `DSH_HOME` | 同上，`DSH_ROOT` 的别名（优先级更低） | 空 |
+| `DSH_CREDENTIALS` | DSH 凭据 YAML 路径 | `<DSH_ROOT>/.credentials.yaml` |
 | `MY_NEURO_CONFIG_PATH` | 宿主 `config.json` 路径 | `live-2d/config.json` |
 | `PET_OCR_MODEL` | `ocr_read.py` 的 VLM 模型名 | `glm-ocr:latest` |
 | `PET_CORE_BIN` | `pet-core` 可执行文件路径（供插件调知识检索） | 自动查找，找不到则退化为纯 BM25/按层返回 |
@@ -242,6 +306,9 @@ cargo test
   这类场景只能走 `SendInput`。
 - **OCR 需要额外模型**。仓库不含任何 OCR/VLM 权重。
 - **插件不是独立应用**。没有宿主时 `plugins/` 只能做语法检查，不能运行。
+- **派活需要宿主 8103 + 执行器**。本仓库不附带 `vts-server.mjs`，也不附带
+  DeepSeek Harness；只装本仓库时 `dispatch_to_dsh` 会明确报「桌宠没在运行」或
+  「未配置 DSH_ROOT」，不会伪造成功。
 - **UIA 覆盖率取决于目标程序**。自绘 UI（游戏、部分 Electron/Qt 应用）没有 UIA 树，
   只能用视觉方案。
 

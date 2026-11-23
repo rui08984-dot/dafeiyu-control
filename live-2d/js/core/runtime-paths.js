@@ -2,7 +2,7 @@
 //
 // 为什么需要：Windows 上 PATH 里的 `python` 常是 Microsoft Store 占位符（一跑就 exit 49，
 //   还会弹商店），于是各插件容易写死成某个具体用户的绝对路径（如
-//   `C:/Users/<name>/AppData/Local/Programs/Python/Python313/python.exe`）——
+//   `<用户目录>/AppData/Local/Programs/Python/Python313/python.exe`）——
 //   换机器、换目录、换用户就永久失效，而且多份拷贝改一处漏八处。
 //   这里按「环境变量 → 配置 → 官方安装目录 → py 启动器」逐级解析，
 //   并且**排除 WindowsApps 占位符 + 实跑一次 `-c pass`**，确保返回的解释器真能执行。

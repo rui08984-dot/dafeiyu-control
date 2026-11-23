@@ -1,4 +1,4 @@
-// _probe/test-dispatch-v2-p1.cjs —— 派活 v2 P1（可停+证据）验收用例
+// tests/test-dispatch-v2-p1.cjs —— 派活 v2 P1（可停+证据）验收用例
 //
 // 覆盖设计 docs/设计-派活v2-2026-11-23.md §5「P1 可停+证据」：
 //   1. verify 四态：pass→done_verified；fail→failed；broken/timeout→done_unproven；
@@ -21,24 +21,44 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const net = require('node:net');
+const Module = require('node:module');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 
 const PROJECT = path.join(__dirname, '..');
-// 该用例依赖宿主运行时的 petbridge（dispatch-runner / vts-server / dispatch-verify）。
-// 公开仓不带宿主，用 MYNEURO_LIVE2D_DIR 指向你本机的 live-2d 目录再跑。
+// 仓内的宿主侧目录就在 live-2d/；想用另一份宿主运行时（带 vts-server）可设 MYNEURO_LIVE2D_DIR。
 const APP = process.env.MYNEURO_LIVE2D_DIR
   ? path.resolve(process.env.MYNEURO_LIVE2D_DIR)
-  : path.join(PROJECT, 'host', 'live-2d');
+  : path.join(PROJECT, 'live-2d');
 const VERIFY_MOD = path.join(APP, 'petbridge', 'dispatch-verify.mjs');
 const RUNNER_MOD = path.join(APP, 'petbridge', 'dispatch-runner.mjs');
+const LEDGER_MOD = path.join(APP, 'petbridge', 'dispatch-ledger.mjs');
 const VTS_MOD = path.join(APP, 'petbridge', 'vts-server.mjs');
 const PLUGIN_MOD = path.join(APP, 'plugins', 'community', 'dispatch', 'index.js');
 
+// 数据目录必须由 config.json 推导（root/data），不受开发机环境变量影响。
+delete process.env.PET_DATA_ROOT;
+delete process.env.PET_DATA_DIR_NAME;
+
+/** 宿主不随仓库分发插件基类/Electron；测试用桩补齐，只验插件自身逻辑。 */
+function installHostStubs() {
+  const origLoad = Module._load;
+  Module._load = function (request) {
+    if (request === 'electron') {
+      return { clipboard: null, shell: null, ipcRenderer: null };
+    }
+    if (/plugin-base\.js$/.test(String(request))) {
+      return { Plugin: class Plugin { constructor(meta, context) { this.meta = meta; this.context = context; } } };
+    }
+    return origLoad.apply(this, arguments);
+  };
+}
+
 let pass = 0;
 let fail = 0;
+let skipped = 0;
 const failures = [];
 function ok(name, cond, detail) {
   if (cond) { pass += 1; return; }
@@ -131,7 +151,7 @@ function writeConfig(dir, dispatch) {
   fs.mkdirSync(appDir, { recursive: true });
   const cfgPath = path.join(appDir, 'config.json');
   fs.writeFileSync(cfgPath, JSON.stringify({ dispatch }, null, 2), 'utf8');
-  return { appDir, cfgPath, room: path.join(dir, 'data') };
+  return { appDir, cfgPath };
 }
 
 async function startProbeServer({ cfgPath, dispatchSpawn, dispatchKill, verifySpawn = null, log = () => {} }) {
@@ -157,6 +177,10 @@ async function startProbeServer({ cfgPath, dispatchSpawn, dispatchKill, verifySp
   dbg('import modules');
   const V = await import(pathToFileURL(VERIFY_MOD).href);
   const R = await import(pathToFileURL(RUNNER_MOD).href);
+  // 数据目录用被测宿主的同一份推导（仓内版是 PET_DATA_DIR_NAME，缺省 data；
+  // 兼容仍用私有目录名的旧宿主，避免测试自己去猜）。
+  const L = await import(pathToFileURL(LEDGER_MOD).href);
+  const roomDirOf = (cfgPath) => L.dispatchRoomDir(cfgPath, {});
   dbg('section 1 verify module');
 
   // ══ 1. verify 模块：workspace / 快照 / settle / 四态 ═══════════════════
@@ -294,6 +318,17 @@ async function startProbeServer({ cfgPath, dispatchSpawn, dispatchKill, verifySp
     ok('runner 正常退出 ok=true', info1.ok === true);
     eq('退出后句柄被移除', runner1.get('runner-events'), null);
 
+    // 2a2. final 事件也带 sessionId（续聊判据不能只依赖 session 事件）
+    const fakeFinal = fakeChild({
+      lines: [{ type: 'final', sessionId: 'sess-final-only', text: '只有 final' }],
+      exitCode: 0,
+      delay: 15,
+    });
+    const runnerFinal = R.createDispatchRunner({ spawnImpl: () => fakeFinal });
+    const hFinal = runnerFinal.start({ taskId: 'runner-final-session', task: 'x' });
+    const infoFinal = await hFinal.result;
+    eq('final 事件补 sessionId', infoFinal.sessionId, 'sess-final-only');
+
     // 2b. 真取消：spawn 一个真 node 子进程，默认 taskkill /T /F
     const runner2 = R.createDispatchRunner({
       spawnImpl: (exe, args, opts) => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { windowsHide: true }),
@@ -310,9 +345,35 @@ async function startProbeServer({ cfgPath, dispatchSpawn, dispatchKill, verifySp
     await sleep(150);
     ok('取消后 pid 不再存活', pidAlive(h2.pid) === false, 'pid=' + h2.pid);
     eq('取消后再查句柄已消失', runner2.get('runner-real-cancel'), null);
+
+    // 2c. DSH 路径参数化（公开仓不写死任何人的安装位置）
+    // 只在被测模块就是本仓库版本时验；外部宿主可能是旧的写死版，不能拿本仓的新契约去套。
+    if (path.resolve(APP) === path.resolve(path.join(PROJECT, 'live-2d'))) {
+      eq('DSH_ROOT 显式生效', R.resolveDshPaths({ DSH_ROOT: 'C:/dsh-install' }).root, 'C:/dsh-install');
+      eq('DSH_HOME 可兜底', R.resolveDshPaths({ DSH_HOME: 'C:/dsh-home' }).root, 'C:/dsh-home');
+      eq('DSH_ROOT 优先于 DSH_HOME',
+        R.resolveDshPaths({ DSH_ROOT: 'C:/a', DSH_HOME: 'C:/b' }).root, 'C:/a');
+      const noRoot = { root: '', exe: '', cli: '', configured: false, error: R.DSH_ROOT_HINT };
+      ok('无根时 spawn 计划附配置指引',
+        /DSH_ROOT/.test(String(R.buildDshSpawnPlan({ task: 'x', env: {}, dshPaths: noRoot }).configError || '')));
+      const fallback = R.buildDshSpawnPlan({
+        task: 'x', env: {},
+        dshPaths: { root: 'C:/nope', exe: 'C:/nope/a.exe', cli: 'C:/nope/b.js' },
+      });
+      ok('有根但文件不存在 → 回退 PATH dsh 并说明',
+        fallback.exe === 'dsh' && /找不到/.test(fallback.configError), JSON.stringify(fallback.configError));
+      ok('任务后缀保留「做完保持结果状态」', R.appendTaskSuffix('做点什么').includes('保持结果状态'));
+    }
   }
 
   // ══ 3. vts-server 集成：verify/返工/workspace/取消 ═══════════════════════
+  // vts-server 是宿主运行时文件（依赖 ws 与多个宿主模块），本仓库不附带。
+  // 仓内用例默认跑「纯模块 + 插件工具面」；要跑集成段就设 MYNEURO_LIVE2D_DIR 指向带它的 live-2d。
+  const serverAvailable = fs.existsSync(VTS_MOD);
+  if (!serverAvailable) {
+    skipped += 2;
+    console.log('  SKIP 第 3/4 节（vts-server 集成 + 开关）：仓内不附带 petbridge/vts-server.mjs');
+  } else {
   dbg('section 3 server');
   const root = tempRoot('p1-server-');
   const ws = path.join(root, 'workspace');
@@ -320,13 +381,14 @@ async function startProbeServer({ cfgPath, dispatchSpawn, dispatchKill, verifySp
   fs.writeFileSync(path.join(ws, 'seed.txt'), 'seed', 'utf8');
   let probe = null;
   try {
-    const { cfgPath, room } = writeConfig(root, {
+    const { cfgPath } = writeConfig(root, {
       ledger_v2: true,
       workspaces: { w: ws, gone: path.join(root, 'not-there-workspace') },
       defaultWorkspace: '',
       cancel: true, verify: true, workspace: true,
       verify_timeout_ms: 60000, rework_max: 1, cancel_grace_ms: 2000,
     });
+    const room = roomDirOf(cfgPath);
     const dispatchLog = [];
     let mode = 'ok-verify-pass';
     let lastChild = null;
@@ -650,7 +712,8 @@ async function startProbeServer({ cfgPath, dispatchSpawn, dispatchKill, verifySp
     let offProbe = null;
     try {
       // 4a. ledger_v2=false：verify/workspace 明确不可用（不静默忽略）
-      const { cfgPath: offCfg, room: offRoom } = writeConfig(offRoot, { ledger_v2: false });
+      const { cfgPath: offCfg } = writeConfig(offRoot, { ledger_v2: false });
+      const offRoom = roomDirOf(offCfg);
       offProbe = await startProbeServer({
         cfgPath: offCfg,
         dispatchSpawn: () => fakeChild({ lines: [{ type: 'final', text: '旧路径' }], exitCode: 0, delay: 20 }),
@@ -699,10 +762,12 @@ async function startProbeServer({ cfgPath, dispatchSpawn, dispatchKill, verifySp
       cleanup(offRoot);
     }
   }
+  }
 
   // ══ 5. 插件工具面：schema 透传 / dispatch_cancel / _check 字段 ═══════════
   dbg('section 5 plugin');
   {
+    installHostStubs();
     const DispatchPlugin = require(PLUGIN_MOD);
     const logs = [];
     const mkPlugin = (extraCfg) => new DispatchPlugin({ name: 'dispatch' }, {
@@ -817,12 +882,13 @@ async function startProbeServer({ cfgPath, dispatchSpawn, dispatchKill, verifySp
 
   // ── 汇总 ──────────────────────────────────────────────────────────────
   const total = pass + fail;
+  const skippedNote = skipped ? '（跳过 ' + skipped + ' 节：vts-server 不在仓内）' : '';
   if (fail) {
-    console.log('FAIL ' + fail + ' / ' + total);
+    console.log('FAIL ' + fail + ' / ' + total + skippedNote);
     for (const f of failures) console.log('  ✗ ' + f);
     process.exitCode = 1;
   } else {
-    console.log('PASS ' + pass + ' / ' + total);
+    console.log('PASS ' + pass + ' / ' + total + skippedNote);
   }
 })().catch((e) => {
   console.error('FATAL ' + (e && e.stack || e));

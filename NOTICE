@@ -14,6 +14,20 @@
 
 Apache-2.0 要求的版权与许可声明见上游仓库的 `LICENSE` 与源文件头。
 
+## morettt/my-neuro — MIT License
+
+- 项目：my-neuro（桌面宠物 / Live2D 助手）
+- 作者：xxxiu 及贡献者
+- 地址：https://github.com/morettt/my-neuro
+- 许可：MIT License，Copyright (c) 2025 xxxiu
+- 使用范围：`live-2d/plugins/community/dispatch/`、`live-2d/plugins/community/game-actions/`
+  的宿主插件形态，以及 `live-2d/js/core/` 下的核心模块（含 `capabilities.js`、
+  `dispatch-followup-policy.js`、`dispatch-retry-policy.js`、`records-path.js` 等）
+  源自该项目或在其基础上做了实质改写。
+- 修改说明：去掉了具体用户的机器路径、私有数据目录名与业务数据；派活 v2 的
+  账本/执行器适配/四态验收（`live-2d/petbridge/`）为本项目重写并参数化。
+- MIT 要求的版权与许可声明见上游仓库 `LICENSE`。
+
 ## 关于 AAAAGENT
 
 **本仓库不包含 AAAAGENT 的任何代码、文档或数据。**

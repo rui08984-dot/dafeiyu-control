@@ -29,10 +29,9 @@ venv/
 *.p12
 *.pfx
 
-# 运行时数据（派活账本 / 技能历史 / 病历本 / 记录室）
+# 运行时数据（派活账本 / 技能历史 / 病历本 / 记录目录）
 /data/
 /pet-runtime/data/
-AI记录室/
 # 自备知识库（用户数据，不入库）
 /pet-runtime/knowledge/
 _private/

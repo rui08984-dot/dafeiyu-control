@@ -12,7 +12,7 @@
 ## 协议（和 `pet-core serve` 同款：一行一个 JSON）
 请求：
 ```
-{"path":"C:/Users/.../pet-game/frame.bgra", "w":1311, "h":877,
+{"path":"/path/to/pet-game/frame.bgra", "w":1311, "h":877,
  "bars":  {"hp":   {"roi":[0.02,0.88,0.18,0.03], "color":"red"}},
  "gray":  {"skill2":{"roi":[0.60,0.93,0.04,0.04], "min":0.35}},
  "colors":{"enemy":{"roi":[0.2,0.1,0.6,0.7], "color":"red", "min_area":0.001}}}
